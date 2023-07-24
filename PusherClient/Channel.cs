@@ -50,6 +50,9 @@ namespace PusherClient
         /// </summary>
         public string Name { get; }
 
+        public string ApiKey { get; }
+        public string DeviceId { get; }
+
         /// <summary>
         /// Gets the channel type; Public, Private or Presence.
         /// </summary>
@@ -75,6 +78,15 @@ namespace PusherClient
         {
             _pusher = pusher;
             Name = channelName;
+            SetEventEmitterErrorHandler(pusher.RaiseChannelError);
+        }
+
+        internal Channel(string channelName, string apiKey, string deviceId, ITriggerChannels pusher)
+        {
+            _pusher = pusher;
+            Name = channelName;
+            ApiKey = apiKey;
+            DeviceId = deviceId;
             SetEventEmitterErrorHandler(pusher.RaiseChannelError);
         }
 

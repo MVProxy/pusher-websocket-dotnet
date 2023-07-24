@@ -20,5 +20,6 @@ namespace PusherClient
         /// <param name="socketId">The socket ID to use</param>
         /// <returns>The response received from the authorization endpoint.</returns>
         Task<string> AuthorizeAsync(string channelName, string socketId);
+        Task<string> AuthorizeAsync(string channelName, string socketId, string apiKey, string deviceId);
     }
 }

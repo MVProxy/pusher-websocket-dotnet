@@ -12,5 +12,6 @@
         /// <param name="socketId">The socket ID to use</param>
         /// <returns></returns>
         string Authorize(string channelName, string socketId);
+        string Authorize(string channelName, string socketId, string apiKey, string deviceId);
     }
 }

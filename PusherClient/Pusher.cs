@@ -426,7 +426,23 @@ namespace PusherClient
                 }
             }
 
-            return await SubscribeAsync(channelName, channel, subscribedEventHandler).ConfigureAwait(false);
+            return await SubscribeAsync(channelName).ConfigureAwait(false);
+        }
+
+
+        public async Task<Channel> SubscribeAsync(string channelName, string apiKey, string deviceId, SubscriptionEventHandler subscribedEventHandler = null)
+        {
+            Guard.ChannelName(channelName);
+
+            if (Channels.TryGetValue(channelName, out Channel channel))
+            {
+                if (channel.IsSubscribed)
+                {
+                    return channel;
+                }
+            }
+
+            return await SubscribeAsync(channelName, apiKey, deviceId, channel, subscribedEventHandler).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -450,8 +466,8 @@ namespace PusherClient
         /// the channel will only be subscribed after calling <c>Pusher.ConnectAsync</c>.
         /// </remarks>
         public async Task<GenericPresenceChannel<MemberT>> SubscribePresenceAsync<MemberT>(
-            string channelName,
-            SubscriptionEventHandler subscribedEventHandler = null)
+           string channelName,
+           SubscriptionEventHandler subscribedEventHandler = null)
         {
             Guard.ChannelName(channelName);
 
@@ -495,6 +511,60 @@ namespace PusherClient
                 if (Channels.TryAdd(channelName, result))
                 {
                     result = (await SubscribeAsync(channelName, result, subscribedEventHandler).ConfigureAwait(false)) as GenericPresenceChannel<MemberT>;
+                }
+            }
+
+            return result;
+        }
+
+        public async Task<GenericPresenceChannel<MemberT>> SubscribePresenceAsync<MemberT>(
+          string channelName,
+          string apiKey,
+          string deviceId,
+          SubscriptionEventHandler subscribedEventHandler = null)
+        {
+            Guard.ChannelName(channelName);
+
+            var channelType = Channel.GetChannelType(channelName);
+            if (channelType != ChannelTypes.Presence)
+            {
+                throw new ArgumentException($"The channel name '{channelName}' is not that of a presence channel. Expecting the name to start with '{Constants.PRESENCE_CHANNEL}'.", nameof(channelName));
+            }
+
+            GenericPresenceChannel<MemberT> result;
+            if (Channels.TryGetValue(channelName, out Channel channel))
+            {
+                if (!(channel is GenericPresenceChannel<MemberT> presenceChannel))
+                {
+                    string errorMsg;
+                    if (channel is PresenceChannel)
+                    {
+                        errorMsg = $"The presence channel '{channelName}' has already been created as a {nameof(PresenceChannel)} : {nameof(PresenceChannel)}<dynamic>.";
+                    }
+                    else
+                    {
+                        errorMsg = $"The presence channel '{channelName}' has already been created but with a different type: {channel.GetType()}";
+                    }
+
+                    throw new ChannelException(errorMsg, ErrorCodes.PresenceChannelAlreadyDefined, channelName, SocketID);
+                }
+
+                if (presenceChannel.IsSubscribed)
+                {
+                    result = presenceChannel;
+                }
+                else
+                {
+                    result = (await SubscribeAsync(channelName, apiKey, deviceId, presenceChannel, subscribedEventHandler).ConfigureAwait(false)) as GenericPresenceChannel<MemberT>;
+                }
+            }
+            else
+            {
+                AuthEndpointCheck(channelName);
+                result = new GenericPresenceChannel<MemberT>(channelName, this);
+                if (Channels.TryAdd(channelName, result))
+                {
+                    result = (await SubscribeAsync(channelName, apiKey, deviceId, result, subscribedEventHandler).ConfigureAwait(false)) as GenericPresenceChannel<MemberT>;
                 }
             }
 
@@ -627,6 +697,52 @@ namespace PusherClient
             return channel;
         }
 
+        private async Task<Channel> SubscribeAsync(string channelName, string apiKey, string deviceId, Channel channel, SubscriptionEventHandler subscribedEventHandler = null)
+        {
+            if (channel == null)
+            {
+                channel = CreateChannel(channelName, apiKey, deviceId);
+            }
+
+            if (subscribedEventHandler != null)
+            {
+                channel.Subscribed -= subscribedEventHandler;
+                channel.Subscribed += subscribedEventHandler;
+            }
+
+            if (State == ConnectionState.Connected)
+            {
+                try
+                {
+
+                    TimeSpan timeoutPeriod = Options.ClientTimeout;
+                    if (!await channel._subscribeLock.WaitAsync(timeoutPeriod).ConfigureAwait(false))
+                    {
+                        throw new OperationTimeoutException(timeoutPeriod, $"{Constants.CHANNEL_SUBSCRIPTION_SUCCEEDED} on {channelName}");
+                    }
+
+                    if (!channel.IsSubscribed)
+                    {
+                        if (Channels.ContainsKey(channelName))
+                        {
+                            await SubscribeChannelAsync(channel, apiKey, deviceId).ConfigureAwait(false);
+                        }
+                    }
+                }
+                catch (Exception error)
+                {
+                    HandleSubscribeChannelError(channel, error);
+                    throw;
+                }
+                finally
+                {
+                    channel._subscribeLock.Release();
+                }
+            }
+
+            return channel;
+        }
+
         private async Task SubscribeChannelAsync(Channel channel)
         {
             string channelName = channel.Name;
@@ -671,6 +787,85 @@ namespace PusherClient
                     else
                     {
                         jsonAuth = Options.ChannelAuthorizer.Authorize(channelName, _connection.SocketId);
+                    }
+
+                    message = CreateAuthorizedChannelSubscribeMessage(channel, jsonAuth);
+                }
+                else
+                {
+                    message = CreateChannelSubscribeMessage(channelName);
+                }
+
+                await _connection.SendAsync(message).ConfigureAwait(false);
+
+                TimeSpan timeoutPeriod = Options.InnerClientTimeout;
+                if (!await channel._subscribeCompleted.WaitAsync(timeoutPeriod).ConfigureAwait(false))
+                {
+                    throw new OperationTimeoutException(timeoutPeriod, $"{Constants.CHANNEL_SUBSCRIPTION_SUCCEEDED} on {channelName}");
+                }
+
+                if (channel._subscriptionError != null)
+                {
+                    throw channel._subscriptionError;
+                }
+            }
+            finally
+            {
+                if (errorHandler != null)
+                {
+                    Error -= errorHandler;
+                }
+
+                channel._subscribeCompleted.Dispose();
+                channel._subscribeCompleted = null;
+            }
+        }
+
+        private async Task SubscribeChannelAsync(Channel channel, string apiKey, string deviceId)
+        {
+            string channelName = channel.Name;
+            ErrorEventHandler errorHandler = null;
+            channel._subscribeCompleted = new SemaphoreSlim(0, 1);
+            try
+            {
+                void SubscribeErrorHandler(object sender, PusherException error)
+                {
+                    if ((int)error.PusherCode < 5000)
+                    {
+                        // If we receive an error from the Pusher cluster then we need to raise a channel subscription error
+                        channel._subscriptionError = new ChannelException(ErrorCodes.SubscriptionError, channel.Name, _connection.SocketId, error);
+                        if (channel._subscribeCompleted != null)
+                        {
+                            channel._subscribeCompleted.Release();
+                        }
+                    }
+                }
+
+                channel._subscriptionError = null;
+                errorHandler = SubscribeErrorHandler;
+                Error += errorHandler;
+                string message;
+                if (channel.ChannelType != ChannelTypes.Public)
+                {
+                    if (channel.ChannelType == ChannelTypes.Presence)
+                    {
+                        await User.SigninDoneAsync().ConfigureAwait(false);
+                    }
+
+                    string jsonAuth;
+                    if (Options.ChannelAuthorizer is IChannelAuthorizerAsync asyncAuthorizer)
+                    {
+                        if (!asyncAuthorizer.Timeout.HasValue)
+                        {
+                            // Use a timeout interval that is less than the outer subscription timeout.
+                            asyncAuthorizer.Timeout = Options.InnerClientTimeout;
+                        }
+
+                        jsonAuth = await asyncAuthorizer.AuthorizeAsync(channelName, _connection.SocketId, apiKey, deviceId).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        jsonAuth = Options.ChannelAuthorizer.Authorize(channelName, _connection.SocketId, apiKey, deviceId);
                     }
 
                     message = CreateAuthorizedChannelSubscribeMessage(channel, jsonAuth);
@@ -784,6 +979,34 @@ namespace PusherClient
                     break;
                 default:
                     result = new Channel(channelName, this);
+                    break;
+            }
+
+            if (!Channels.TryAdd(channelName, result))
+            {
+                result = Channels[channelName];
+            }
+
+            return result;
+        }
+
+        private Channel CreateChannel(string channelName, string apiKey, string deviceId)
+        {
+            ChannelTypes type = Channel.GetChannelType(channelName);
+            Channel result;
+            switch (type)
+            {
+                case ChannelTypes.Private:
+                case ChannelTypes.PrivateEncrypted:
+                    AuthEndpointCheck(channelName);
+                    result = new PrivateChannel(channelName, apiKey, deviceId, this);
+                    break;
+                case ChannelTypes.Presence:
+                    AuthEndpointCheck(channelName);
+                    result = new PresenceChannel(channelName, apiKey, deviceId, this);
+                    break;
+                default:
+                    result = new Channel(channelName, apiKey, deviceId, this);
                     break;
             }
 
@@ -1051,7 +1274,7 @@ namespace PusherClient
                 {
                     try
                     {
-                        Task.WaitAll(Task.Run(() => SubscribeAsync(channel.Name, channel)));
+                        Task.WaitAll(Task.Run(() => SubscribeAsync(channel.Name, channel.ApiKey, channel.DeviceId, channel)));
                     }
                     catch (AggregateException aggregateException)
                     {

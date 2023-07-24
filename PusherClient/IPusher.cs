@@ -16,8 +16,8 @@ namespace PusherClient
         IEventBinder GetEventBinder(string eventBinderKey);
         IEventBinder GetChannelEventBinder(string eventBinderKey, string channelName);
         byte[] GetSharedSecret(string channelName);
-
         Task<Channel> SubscribeAsync(string channelName, SubscriptionEventHandler subscribedEventHandler = null);
+        Task<Channel> SubscribeAsync(string channelName, string apiKey, string deviceId, SubscriptionEventHandler subscribedEventHandler = null);
 
     }
 }

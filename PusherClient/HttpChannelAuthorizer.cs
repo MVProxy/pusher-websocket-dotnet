@@ -33,6 +33,11 @@ namespace PusherClient
         /// </summary>
         public TimeSpan? Timeout { get; set; }
 
+        public bool ProxyInUse { get; set; }
+        public string ProxyHost { get; set; }
+        public int ProxyPort { get; set; }
+
+
         /// <summary>
         /// Perform the authorization of the channel.
         /// </summary>
@@ -48,6 +53,21 @@ namespace PusherClient
             try
             {
                 result = AuthorizeAsync(channelName, socketId).Result;
+            }
+            catch (AggregateException aggregateException)
+            {
+                throw aggregateException.InnerException;
+            }
+
+            return result;
+        }
+
+        public string Authorize(string channelName, string socketId, string apiKey, string deviceId)
+        {
+            string result;
+            try
+            {
+                result = AuthorizeAsync(channelName, socketId, apiKey, deviceId).Result;
             }
             catch(AggregateException aggregateException)
             {
@@ -113,6 +133,71 @@ namespace PusherClient
                         authToken = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                     }
                     catch(Exception e)
+                    {
+                        throw new ChannelAuthorizationFailureException(ErrorCodes.ChannelAuthorizationError, _authEndpoint.OriginalString, channelName, socketId, e);
+                    }
+                }
+            }
+
+            return authToken;
+        }
+
+        public async Task<string> AuthorizeAsync(string channelName, string socketId, string apiKey, string deviceId)
+        {
+            Guard.ChannelName(channelName);
+
+            //Addition for proxy usage
+            var httpClientHandler = new HttpClientHandler
+            {
+                Proxy = new WebProxy(ProxyHost, ProxyPort),
+                UseProxy = ProxyInUse                    
+            };
+
+            string authToken = null;
+            using (var httpClient = new HttpClient(httpClientHandler))
+            {
+                var data = new List<KeyValuePair<string, string>>
+                {
+                    new KeyValuePair<string, string>("channel_name", channelName),
+                    new KeyValuePair<string, string>("socket_id", socketId),
+                    new KeyValuePair<string, string>("device", deviceId),
+                    new KeyValuePair<string, string>("apikey", apiKey),
+                };
+
+                using (HttpContent content = new FormUrlEncodedContent(data))
+                {
+                    HttpResponseMessage response = null;
+                    try
+                    {
+                        PreAuthorize(httpClient);
+                        response = await httpClient.PostAsync(_authEndpoint, content).ConfigureAwait(false);
+                    }
+                    catch (Exception e)
+                    {
+                        ErrorCodes code = ErrorCodes.ChannelAuthorizationError;
+                        if (e is TaskCanceledException)
+                        {
+                            code = ErrorCodes.ChannelAuthorizationTimeout;
+                        }
+
+                        throw new ChannelAuthorizationFailureException(code, _authEndpoint.OriginalString, channelName, socketId, e);
+                    }
+
+                    if (response.StatusCode == HttpStatusCode.RequestTimeout || response.StatusCode == HttpStatusCode.GatewayTimeout)
+                    {
+                        throw new ChannelAuthorizationFailureException($"Authorization timeout ({response.StatusCode}).", ErrorCodes.ChannelAuthorizationTimeout, _authEndpoint.OriginalString, channelName, socketId);
+                    }
+                    else if (response.StatusCode == HttpStatusCode.Forbidden)
+                    {
+                        throw new ChannelUnauthorizedException(_authEndpoint.OriginalString, channelName, socketId);
+                    }
+
+                    try
+                    {
+                        response.EnsureSuccessStatusCode();
+                        authToken = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception e)
                     {
                         throw new ChannelAuthorizationFailureException(ErrorCodes.ChannelAuthorizationError, _authEndpoint.OriginalString, channelName, socketId, e);
                     }

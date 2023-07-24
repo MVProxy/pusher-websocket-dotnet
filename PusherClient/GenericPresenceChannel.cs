@@ -26,6 +26,10 @@ namespace PusherClient
         {
         }
 
+        internal GenericPresenceChannel(string channelName, string apiKey, string deviceId, ITriggerChannels pusher) : base(channelName, apiKey, deviceId, pusher)
+        {
+        }
+
         /// <summary>
         /// Gets the Members of the channel
         /// </summary>

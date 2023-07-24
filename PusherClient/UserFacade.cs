@@ -216,6 +216,7 @@ namespace PusherClient
 
         private async void _SubscribeToUserChannel() {
             // TODO check if something else is needed to subscribe to user channel
+            //TODO(custom): does this need apikey and deviceId maybe?
             _userChannel = await _pusher.SubscribeAsync(Constants.USER_CHANNEL_PREFIX + user.id);
             _userChannel.BindAll(OnUserChannelEvent);
         }
